@@ -29,14 +29,14 @@ elif opt.gpu_id=='1':
 #load the model
 model = BBSNet()
 #Large epoch size may not generalize well. You can choose a good model to load according to the log file and pth files saved in ('./BBSNet_cpts/') when training.
-model.load_state_dict(torch.load('./BBSNet_cpts/BBSNet_epoch_195.pth')) #'./model_pths/BBSNet_epoch_best.pth'))
+model.load_state_dict(torch.load('./model_pths/v3-lightweight-BBSagBBSNet_epoch_best.pth')) #'./model_pths/BBSNet_epoch_best.pth'))
 model.cuda()
 model.eval()
 
 #test
-test_datasets = ['NJU2K','NLPR','STERE', 'DES', 'SSD','LFSD','SIP']
+test_datasets = ['NJU2K','NLPR','STERE', 'DES', 'LFSD','SIP']
 for dataset in test_datasets:
-    save_path = './test_maps/BBSNet/epoch195/' + dataset + '/'
+    save_path = './test_maps/BBSNet/v3-lightweight-BBSagBBSNet/' + dataset + '/'
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     image_root = dataset_path + dataset + '/RGB/'
@@ -55,7 +55,7 @@ for dataset in test_datasets:
         _,res = model(image,depth)
         torch.cuda.synchronize()
         time_e = time.time()
-        print('Speed: %f FPS' % (1 / (time_e - time_s)))
+        #print('Speed: %f FPS' % (1 / (time_e - time_s)))
         res = F.upsample(res, size=gt.shape, mode='bilinear', align_corners=False)
         res = res.sigmoid().data.cpu().numpy().squeeze()
         res = (res - res.min()) / (res.max() - res.min() + 1e-8)

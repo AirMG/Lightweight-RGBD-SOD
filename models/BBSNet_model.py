@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from .ResNet import ResNet50
 from torch.nn import functional as F
+from .GhostNet import ghostnet
+import time
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -199,15 +200,16 @@ class aggregation_final(nn.Module):
         self.conv_concat3 = BasicConv2d(3 * channel, 3 * channel, 3, padding=1)
 
     def forward(self, x1, x2, x3):
+
         x1_1 = x1
         x2_1 = self.conv_upsample1(self.upsample(x1)) * x2
-        x3_1 = self.conv_upsample2(self.upsample(x1)) \
-               * self.conv_upsample3(x2) * x3
+        x3_1 = self.conv_upsample2(self.upsample(self.upsample(x1))) \
+               * self.conv_upsample3(self.upsample(x2)) * x3
 
         x2_2 = torch.cat((x2_1, self.conv_upsample4(self.upsample(x1_1))), 1)
         x2_2 = self.conv_concat2(x2_2)
 
-        x3_2 = torch.cat((x3_1, self.conv_upsample5(x2_2)), 1)
+        x3_2 = torch.cat((x3_1, self.conv_upsample5(self.upsample(x2_2))), 1)
         x3_2 = self.conv_concat3(x3_2)
 
         return x3_2
@@ -218,34 +220,34 @@ class Refine(nn.Module):
     def __init__(self):
         super(Refine, self).__init__()
         self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.upsample4 = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)
 
     def forward(self, attention, x1, x2, x3):
         # Note that there is an error in the manuscript. In the paper, the refinement strategy is depicted as ""f'=f*S1"", it should be ""f'=f+f*S1"".
-        x1 = x1 + torch.mul(x1, self.upsample2(attention))
+        x1 = x1 + torch.mul(x1, self.upsample4(attention))
         x2 = x2 + torch.mul(x2, self.upsample2(attention))
         x3 = x3 + torch.mul(x3, attention)
 
         return x1, x2, x3
 
-
 # BBSNet
 class BBSNet(nn.Module):
-    def __init__(self, channel=32):
+    def __init__(self, channel=16):
         super(BBSNet, self).__init__()
 
         # Backbone model
-        self.resnet = ResNet50()
+        self.net = ghostnet()
 
         # Decoder 1
-        self.rfb2_1 = GCM(512, channel)
-        self.rfb3_1 = GCM(1024, channel)
-        self.rfb4_1 = GCM(2048, channel)
+        self.rfb2_1 = GCM(40, channel)
+        self.rfb3_1 = GCM(112, channel)
+        self.rfb4_1 = GCM(160, channel)
         self.agg1 = aggregation_init(channel)
 
         # Decoder 2
-        self.rfb0_2 = GCM(64, channel)
-        self.rfb1_2 = GCM(256, channel)
-        self.rfb5_2 = GCM(512, channel)
+        self.rfb0_2 = GCM(16, channel)
+        self.rfb1_2 = GCM(24, channel)
+        self.rfb5_2 = GCM(40, channel)
         self.agg2 = aggregation_final(channel)
 
         # upsample function
@@ -258,10 +260,10 @@ class BBSNet(nn.Module):
 
         # Components of DEM module
         self.atten_depth_channel_0 = ChannelAttention(3)
-        self.atten_depth_channel_1 = ChannelAttention(64)
-        self.atten_depth_channel_2 = ChannelAttention(256)
-        self.atten_depth_channel_3_1 = ChannelAttention(512)
-        self.atten_depth_channel_4_1 = ChannelAttention(1024)
+        self.atten_depth_channel_1 = ChannelAttention(16)
+        self.atten_depth_channel_2 = ChannelAttention(24)
+        self.atten_depth_channel_3_1 = ChannelAttention(40)
+        self.atten_depth_channel_4_1 = ChannelAttention(112)
 
         self.atten_depth_spatial_0 = SpatialAttention()
         self.atten_depth_spatial_1 = SpatialAttention()
@@ -270,59 +272,64 @@ class BBSNet(nn.Module):
         self.atten_depth_spatial_4_1 = SpatialAttention()
 
         # Components of PTM module
-        self.inplanes = 32 * 2
-        self.deconv1 = self._make_transpose(TransBasicBlock, 32 * 2, 3, stride=2)
-        self.inplanes = 32
-        self.deconv2 = self._make_transpose(TransBasicBlock, 32, 3, stride=2)
-        self.agant1 = self._make_agant_layer(32 * 3, 32 * 2)
-        self.agant2 = self._make_agant_layer(32 * 2, 32)
-        self.out0_conv = nn.Conv2d(32 * 3, 1, kernel_size=1, stride=1, bias=True)
-        self.out1_conv = nn.Conv2d(32 * 2, 1, kernel_size=1, stride=1, bias=True)
-        self.out2_conv = nn.Conv2d(32 * 1, 1, kernel_size=1, stride=1, bias=True)
+        self.inplanes = 16 * 2
+        self.deconv1 = self._make_transpose(TransBasicBlock, 16 * 2, 3, stride=2)
+        # self.inplanes = 16
+        # self.deconv2 = self._make_transpose(TransBasicBlock, 16, 3, stride=2)
+        self.agant1 = self._make_agant_layer(16 * 3, 16 * 2)
+        # self.agant2 = self._make_agant_layer(16 * 2, 16)
+        self.out0_conv = nn.Conv2d(16 * 3, 1, kernel_size=1, stride=1, bias=True)
+        self.out1_conv = nn.Conv2d(16 * 2, 1, kernel_size=1, stride=1, bias=True)
+        self.out2_conv = nn.Conv2d(16 * 1, 1, kernel_size=1, stride=1, bias=True)
 
         cp = []
 
-        cp.append(BasicConv2d(64,3,1))
-        cp.append(BasicConv2d(256,64,1))
-        cp.append(BasicConv2d(512,256,1))
-        cp.append(BasicConv2d(1024,512,1))
-        cp.append(BasicConv2d(2048,1024,1))
+        cp.append(BasicConv2d(16,3,1))
+        cp.append(BasicConv2d(24,16,1))
+        cp.append(BasicConv2d(40,24,1))
+        cp.append(BasicConv2d(112,40,1))
+        cp.append(BasicConv2d(160,112,1))
         self.CP = nn.ModuleList(cp)
 
         if self.training:
-            self.initialize_weights()
+            # self.initialize_weights()
+            net = torch.hub.load('huawei-noah/ghostnet', 'ghostnet_1x', pretrained=True)
+            pretrained_dict = net.state_dict()
+            self.net.load_state_dict(pretrained_dict,strict=False)
+
 
     def forward(self, x, x_depth):
-        x_depth = self.resnet.conv1(x_depth)
-        x_depth = self.resnet.bn1(x_depth)
-        x_depth = self.resnet.relu(x_depth)
-        x_depth = self.resnet.maxpool(x_depth)
-        x1_depth = self.resnet.layer1(x_depth)
-        x2_depth = self.resnet.layer2(x1_depth)
-        x3_1_depth = self.resnet.layer3_1(x2_depth)
-        x4_1_depth = self.resnet.layer4_1(x3_1_depth)
+        x_depth = self.net.conv_stem(x_depth)
+        x_depth = self.net.bn1(x_depth)
+        x_depth = self.net.relu(x_depth)
+        x_depth = self.net.layer1(x_depth)
+        x1_depth = self.net.layer2(x_depth)
+        x2_depth = self.net.layer3(x1_depth)
+        x3_1_depth = self.net.layer4(x2_depth)
+        x4_1_depth = self.net.layer5(x3_1_depth)
+
 
         # layer0 merge
         x_depth = self.CP[0](x_depth)
         temp = x_depth.mul(self.atten_depth_channel_0(x_depth))
         temp = temp.mul(self.atten_depth_spatial_0(temp))
-        x = x + F.interpolate(temp,scale_factor=4,mode='bilinear',align_corners=True)
+        x = x + F.interpolate(temp,scale_factor=2,mode='bilinear',align_corners=True)
 
         # layer0 merge end
 
-        x = self.resnet.conv1(x)
-        x = self.resnet.bn1(x)
-        x = self.resnet.relu(x)
-        x = self.resnet.maxpool(x)
+        x = self.net.conv_stem(x)
+        x = self.net.bn1(x)
+        x = self.net.relu(x)
+        x = self.net.layer1(x)
 
         # layer1 merge
         x1_depth = self.CP[1](x1_depth)
         temp = x1_depth.mul(self.atten_depth_channel_1(x1_depth))
         temp = temp.mul(self.atten_depth_spatial_1(temp))
-        x = x + temp
+        x = x + F.interpolate(temp,scale_factor=2,mode='bilinear',align_corners=True)
         # layer1 merge end
 
-        x1 = self.resnet.layer1(x)  # 256 x 64 x 64
+        x1 = self.net.layer2(x)  # 24 x 16 x 16
 
         # layer2 merge
         x2_depth = self.CP[2](x2_depth)
@@ -331,27 +338,27 @@ class BBSNet(nn.Module):
         x1 = x1 + F.interpolate(temp,scale_factor=2,mode='bilinear',align_corners=True)
         # layer2 merge end
 
-        x2 = self.resnet.layer2(x1)  # 512 x 32 x 32
+        x2 = self.net.layer3(x1)  # 40 x 24 x 24
 
-        # layer3_1 merge
+        # layer3 merge
         x3_1_depth = self.CP[3](x3_1_depth)
         temp = x3_1_depth.mul(self.atten_depth_channel_3_1(x3_1_depth))
         temp = temp.mul(self.atten_depth_spatial_3_1(temp))
         x2 = x2 + F.interpolate(temp,scale_factor=2,mode='bilinear',align_corners=True)
-        # layer3_1 merge end
+        # layer3 merge end
 
         x2_1 = x2
-        x3_1 = self.resnet.layer3_1(x2_1)  # 1024 x 16 x 16
+        x3_1 = self.net.layer4(x2_1)  # 112 x 16 x 16
 
-        # layer4_1 merge
+        # layer4 merge
         x4_1_depth = self.CP[4](x4_1_depth)
         temp = x4_1_depth.mul(self.atten_depth_channel_4_1(x4_1_depth))
         temp = temp.mul(self.atten_depth_spatial_4_1(temp))
         x3_1 = x3_1+ F.interpolate(temp,scale_factor=2,mode='bilinear',align_corners=True)
-        # layer4_1 merge end
+        # layer4 merge end
 
-        x4_1 = self.resnet.layer4_1(x3_1)  # 2048 x 8 x 8
-
+        x4_1 = self.net.layer5(x3_1)  # 160 x 8 x 8
+        time_2 = time.time()
         # produce initial saliency map by decoder1
         x2_1 = self.rfb2_1(x2_1)
         x3_1 = self.rfb3_1(x3_1)
@@ -370,9 +377,11 @@ class BBSNet(nn.Module):
         # PTM module
         y = self.agant1(y)
         y = self.deconv1(y)
-        y = self.agant2(y)
-        y = self.deconv2(y)
-        y = self.out2_conv(y)
+        # y = self.agant2(y)
+        # y = self.deconv2(y)
+        y = self.out1_conv(y)
+
+        #print('Speed: %f %f %fFPS' % ((1 / (time_2 - time_1)), (1 / (time_3 - time_2)), (1 / (time_4 - time_1))))
 
         return self.upsample(attention_map), y
 
@@ -413,10 +422,10 @@ class BBSNet(nn.Module):
 
     # initialize the weights
     def initialize_weights(self):
-        res50 = models.resnet50(pretrained=True)
-        pretrained_dict = res50.state_dict()
+        net = torch.hub.load('huawei-noah/ghostnet', 'ghostnet_1x', pretrained=True)
+        pretrained_dict = net.state_dict()
         all_params = {}
-        for k, v in self.resnet.state_dict().items():
+        for k, v in self.net.state_dict().items():
             if k in pretrained_dict.keys():
                 v = pretrained_dict[k]
                 all_params[k] = v
@@ -428,11 +437,11 @@ class BBSNet(nn.Module):
                 name = k.split('_2')[0] + k.split('_2')[1]
                 v = pretrained_dict[name]
                 all_params[k] = v
-        assert len(all_params.keys()) == len(self.resnet.state_dict().keys())
-        self.resnet.load_state_dict(all_params)
+        assert len(all_params.keys()) == len(self.net.state_dict().keys())
+        self.net.load_state_dict(all_params)
 
         # all_params = {}
-        # for k, v in self.resnet_depth.state_dict().items():
+        # for k, v in self.net_depth.state_dict().items():
         #     if k == 'conv1.weight':
         #         all_params[k] = torch.nn.init.normal_(v, mean=0, std=1)
         #     elif k in pretrained_dict.keys():
@@ -446,5 +455,5 @@ class BBSNet(nn.Module):
         #         name = k.split('_2')[0] + k.split('_2')[1]
         #         v = pretrained_dict[name]
         #         all_params[k] = v
-        # assert len(all_params.keys()) == len(self.resnet_depth.state_dict().keys())
-        # self.resnet_depth.load_state_dict(all_params)
+        # assert len(all_params.keys()) == len(self.net_depth.state_dict().keys())
+        # self.net_depth.load_state_dict(all_params)
